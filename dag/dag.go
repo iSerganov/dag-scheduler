@@ -1,8 +1,10 @@
+// Package dag provides a thread-safe directed acyclic graph of Nodes.
 package dag
 
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"sync"
 )
 
@@ -77,6 +79,7 @@ func (d *DAG) Node(id uint64) (*Node, bool) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	n, ok := d.nodes[id]
+
 	return n, ok
 }
 
@@ -88,6 +91,7 @@ func (d *DAG) Nodes() []*Node {
 	for _, n := range d.nodes {
 		out = append(out, n)
 	}
+
 	return out
 }
 
@@ -100,6 +104,7 @@ func (d *DAG) Dependents(id uint64) []*Node {
 	for _, depID := range ids {
 		out = append(out, d.nodes[depID])
 	}
+
 	return out
 }
 
@@ -109,9 +114,8 @@ func (d *DAG) InDegrees() map[uint64]int {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	out := make(map[uint64]int, len(d.inDeg))
-	for id, deg := range d.inDeg {
-		out[id] = deg
-	}
+	maps.Copy(out, d.inDeg)
+
 	return out
 }
 
@@ -140,5 +144,6 @@ func (d *DAG) RemoveNode(id uint64) {
 func (d *DAG) Len() int {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
+
 	return len(d.nodes)
 }

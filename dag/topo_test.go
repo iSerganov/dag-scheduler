@@ -11,6 +11,7 @@ type TopoSuite struct {
 }
 
 func TestTopoSuite(t *testing.T) {
+	t.Parallel()
 	suite.Run(t, new(TopoSuite))
 }
 
@@ -70,7 +71,7 @@ func (s *TopoSuite) TestSort_ErrCycle_SentinelReachable() {
 	_ = d.AddNode(&Node{Task: stask(10, "a")})
 	_, err := d.Sort()
 	s.NoError(err)
-	s.NotNil(ErrCycle)
+	s.Error(ErrCycle)
 }
 
 // posMap returns a node-ID → position-in-slice map for assertion helpers.
@@ -79,5 +80,6 @@ func posMap(nodes []*Node) map[uint64]int {
 	for i, n := range nodes {
 		m[n.Task.ID()] = i
 	}
+
 	return m
 }

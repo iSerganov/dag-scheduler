@@ -6,7 +6,7 @@ import "context"
 // It must implement the Run method to perform the actual work.
 // It must also implement the ID method to return a unique identifier for the task.
 type Task interface {
-	Run(context.Context) error
+	Run(ctx context.Context) error
 	ID() uint64
 	Name() string
 }

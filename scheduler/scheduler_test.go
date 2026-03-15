@@ -20,27 +20,8 @@ type SchedulerSuite struct {
 }
 
 func TestSchedulerSuite(t *testing.T) {
+	t.Parallel()
 	suite.Run(t, new(SchedulerSuite))
-}
-
-// mustAdd is a helper that calls AddTask and fails the test on error.
-func (s *SchedulerSuite) mustAdd(sch *scheduler.Scheduler, t dag.Task, deps ...dag.Task) {
-	s.T().Helper()
-	s.Require().NoError(sch.AddTask(t, deps...))
-}
-
-// assertBefore asserts that dep appears before task in plan (keyed by "<id>: <name>").
-func (s *SchedulerSuite) assertBefore(pos map[string]int, dep, task dag.Task) {
-	s.T().Helper()
-	depEntry := fmt.Sprintf("%d: %s", dep.ID(), dep.Name())
-	taskEntry := fmt.Sprintf("%d: %s", task.ID(), task.Name())
-	di, dok := pos[depEntry]
-	ti, tok := pos[taskEntry]
-	s.True(dok, "entry %q missing from plan", depEntry)
-	s.True(tok, "entry %q missing from plan", taskEntry)
-	if dok && tok {
-		s.Less(di, ti, "want %q before %q", depEntry, taskEntry)
-	}
 }
 
 // ── Run ──────────────────────────────────────────────────────────────────────
@@ -50,9 +31,27 @@ func (s *SchedulerSuite) TestRun_LinearChain() {
 	var order []string
 	var mu sync.Mutex
 
-	a := dag.Func(1, "a", func(_ context.Context) error { mu.Lock(); order = append(order, "a"); mu.Unlock(); return nil })
-	b := dag.Func(2, "b", func(_ context.Context) error { mu.Lock(); order = append(order, "b"); mu.Unlock(); return nil })
-	c := dag.Func(3, "c", func(_ context.Context) error { mu.Lock(); order = append(order, "c"); mu.Unlock(); return nil })
+	a := dag.Func(1, "a", func(_ context.Context) error {
+		mu.Lock()
+		order = append(order, "a")
+		mu.Unlock()
+
+		return nil
+	})
+	b := dag.Func(2, "b", func(_ context.Context) error {
+		mu.Lock()
+		order = append(order, "b")
+		mu.Unlock()
+
+		return nil
+	})
+	c := dag.Func(3, "c", func(_ context.Context) error {
+		mu.Lock()
+		order = append(order, "c")
+		mu.Unlock()
+
+		return nil
+	})
 
 	s.mustAdd(sch, a)
 	s.mustAdd(sch, b, a)
@@ -77,6 +76,7 @@ func (s *SchedulerSuite) TestRun_ParallelBranches() {
 		bStart = time.Now()
 		mu.Unlock()
 		time.Sleep(delay)
+
 		return nil
 	})
 	c := dag.Func(3, "c", func(_ context.Context) error {
@@ -84,6 +84,7 @@ func (s *SchedulerSuite) TestRun_ParallelBranches() {
 		cStart = time.Now()
 		mu.Unlock()
 		time.Sleep(delay)
+
 		return nil
 	})
 	d := dag.Func(4, "d", func(_ context.Context) error { return nil })
@@ -113,7 +114,11 @@ func (s *SchedulerSuite) TestRun_TaskError_PropagatesAndSkipsDependents() {
 	var ran atomic.Bool
 
 	a := dag.Func(1, "a", func(_ context.Context) error { return boom })
-	b := dag.Func(2, "b", func(_ context.Context) error { ran.Store(true); return nil })
+	b := dag.Func(2, "b", func(_ context.Context) error {
+		ran.Store(true)
+
+		return nil
+	})
 
 	s.mustAdd(sch, a)
 	s.mustAdd(sch, b, a)
@@ -126,9 +131,14 @@ func (s *SchedulerSuite) TestRun_ContextCancellation() {
 	sch := scheduler.New()
 	ctx, cancel := context.WithCancel(context.Background())
 
-	a := dag.Func(1, "a", func(_ context.Context) error { cancel(); return nil })
+	a := dag.Func(1, "a", func(_ context.Context) error {
+		cancel()
+
+		return nil
+	})
 	b := dag.Func(2, "b", func(_ context.Context) error {
 		s.Fail("b should not run after context cancellation")
+
 		return nil
 	})
 
@@ -144,7 +154,11 @@ func (s *SchedulerSuite) TestRun_Empty() {
 func (s *SchedulerSuite) TestRun_SingleTask() {
 	sch := scheduler.New()
 	ran := false
-	s.mustAdd(sch, dag.Func(1, "only", func(_ context.Context) error { ran = true; return nil }))
+	s.mustAdd(sch, dag.Func(1, "only", func(_ context.Context) error {
+		ran = true
+
+		return nil
+	}))
 	s.Require().NoError(sch.Run(context.Background()))
 	s.True(ran)
 }
@@ -157,6 +171,7 @@ func (s *SchedulerSuite) TestRun_TaskInProgress() {
 	s.mustAdd(sch, dag.Func(1, "a", func(_ context.Context) error {
 		close(started)
 		<-unblock
+
 		return nil
 	}))
 
@@ -190,9 +205,21 @@ func (s *SchedulerSuite) TestRunNext_LinearChain() {
 	sch := scheduler.New()
 	var order []string
 
-	a := dag.Func(1, "a", func(_ context.Context) error { order = append(order, "a"); return nil })
-	b := dag.Func(2, "b", func(_ context.Context) error { order = append(order, "b"); return nil })
-	c := dag.Func(3, "c", func(_ context.Context) error { order = append(order, "c"); return nil })
+	a := dag.Func(1, "a", func(_ context.Context) error {
+		order = append(order, "a")
+
+		return nil
+	})
+	b := dag.Func(2, "b", func(_ context.Context) error {
+		order = append(order, "b")
+
+		return nil
+	})
+	c := dag.Func(3, "c", func(_ context.Context) error {
+		order = append(order, "c")
+
+		return nil
+	})
 
 	s.mustAdd(sch, a)
 	s.mustAdd(sch, b, a)
@@ -234,6 +261,7 @@ func (s *SchedulerSuite) TestRunNext_TaskInProgress() {
 	s.mustAdd(sch, dag.Func(1, "a", func(_ context.Context) error {
 		close(started)
 		<-unblock
+
 		return nil
 	}))
 
@@ -253,6 +281,7 @@ func (s *SchedulerSuite) TestRunNext_ThenRun_DoesNotRepeatTasks() {
 			mu.Lock()
 			executed = append(executed, name)
 			mu.Unlock()
+
 			return nil
 		}
 	}
@@ -421,4 +450,24 @@ func (s *SchedulerSuite) TestExecutionPlan_Empty() {
 	plan, err := scheduler.New().ExecutionPlan()
 	s.Require().NoError(err)
 	s.Empty(plan)
+}
+
+// mustAdd is a helper that calls AddTask and fails the test on error.
+func (s *SchedulerSuite) mustAdd(sch *scheduler.Scheduler, t dag.Task, deps ...dag.Task) {
+	s.T().Helper()
+	s.Require().NoError(sch.AddTask(t, deps...))
+}
+
+// assertBefore asserts that dep appears before task in plan (keyed by "<id>: <name>").
+func (s *SchedulerSuite) assertBefore(pos map[string]int, dep, task dag.Task) {
+	s.T().Helper()
+	depEntry := fmt.Sprintf("%d: %s", dep.ID(), dep.Name())
+	taskEntry := fmt.Sprintf("%d: %s", task.ID(), task.Name())
+	di, dok := pos[depEntry]
+	ti, tok := pos[taskEntry]
+	s.True(dok, "entry %q missing from plan", depEntry)
+	s.True(tok, "entry %q missing from plan", taskEntry)
+	if dok && tok {
+		s.Less(di, ti, "want %q before %q", depEntry, taskEntry)
+	}
 }

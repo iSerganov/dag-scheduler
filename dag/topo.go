@@ -36,5 +36,6 @@ func (d *DAG) Sort() ([]*Node, error) {
 	if len(sorted) != n {
 		return nil, fmt.Errorf("%w: %d node(s) involved", ErrCycle, n-len(sorted))
 	}
+
 	return sorted, nil
 }

@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"math/rand"
+	"math/rand/v2"
 	"testing"
 
 	"github.com/brianvoe/gofakeit/v7"
@@ -43,16 +43,15 @@ func BenchmarkRun_1000Tasks(b *testing.B) {
 	)
 
 	// ── Build task objects and dependency lists once ──────────────────────────
-	rng := rand.New(rand.NewSource(42))
-
 	defs := make([]taskDef, numTasks)
 	for i := range numTasks {
 		id := uint64(i + 1)
 		name := gofakeit.HipsterWord()
 
 		defs[i].task = dag.Func(id, name, func(_ context.Context) error {
-			fmt.Fprintf(io.Discard, "task [ID: %d, Name: %s] has successfully finished\n", id, name)
-			return nil
+			_, err := fmt.Fprintf(io.Discard, "task [ID: %d, Name: %s] has successfully finished\n", id, name)
+
+			return err
 		})
 
 		if i < numRoots {
@@ -60,8 +59,8 @@ func BenchmarkRun_1000Tasks(b *testing.B) {
 		}
 
 		// Pick between minDeps and maxDeps unique predecessors.
-		n := minDeps + rng.Intn(maxDeps-minDeps+1)
-		defs[i].deps = sampleDeps(rng, defs[:i], n)
+		n := minDeps + rand.IntN(maxDeps-minDeps+1)
+		defs[i].deps = sampleDeps(defs[:i], n)
 	}
 
 	b.ReportAllocs()
@@ -87,12 +86,13 @@ func BenchmarkRun_1000Tasks(b *testing.B) {
 // sampleDeps returns n distinct dag.Task values drawn at random from pool
 // using a partial Fisher-Yates shuffle. If n ≥ len(pool) the whole pool is
 // returned.
-func sampleDeps(rng *rand.Rand, pool []taskDef, n int) []dag.Task {
+func sampleDeps(pool []taskDef, n int) []dag.Task {
 	if n >= len(pool) {
 		out := make([]dag.Task, len(pool))
 		for i, d := range pool {
 			out[i] = d.task
 		}
+
 		return out
 	}
 
@@ -102,7 +102,7 @@ func sampleDeps(rng *rand.Rand, pool []taskDef, n int) []dag.Task {
 		indices[i] = i
 	}
 	for i := range n {
-		j := i + rng.Intn(len(pool)-i)
+		j := i + rand.IntN(len(pool)-i)
 		indices[i], indices[j] = indices[j], indices[i]
 	}
 
@@ -110,5 +110,6 @@ func sampleDeps(rng *rand.Rand, pool []taskDef, n int) []dag.Task {
 	for i := range n {
 		out[i] = pool[indices[i]].task
 	}
+
 	return out
 }

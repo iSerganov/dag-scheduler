@@ -61,12 +61,14 @@ func (s *Scheduler) AddTask(t dag.Task, deps ...dag.Task) error {
 	}
 
 	node := &dag.Node{Task: t, Deps: deps}
-	if err := s.d.AddNode(node); err != nil {
+	err := s.d.AddNode(node)
+	if err != nil {
 		return fmt.Errorf("scheduler: %w", err)
 	}
 
 	s.byID[t.ID()] = node
 	s.step = nil // invalidate any in-progress step state
+
 	return nil
 }
 
@@ -83,6 +85,7 @@ func (s *Scheduler) ExecutionPlan() ([]string, error) {
 	for i, n := range sorted {
 		plan[i] = fmt.Sprintf("%d: %s", n.Task.ID(), n.Task.Name())
 	}
+
 	return plan, nil
 }
 
@@ -125,10 +128,12 @@ func (s *Scheduler) Run(ctx context.Context) error {
 		// Skip execution but still drain the subgraph so the WaitGroup settles.
 		if ctx.Err() != nil || failed.Load() {
 			s.drainDependents(n, counters, &wg, runNode)
+
 			return
 		}
 
-		if err := n.Task.Run(ctx); err != nil {
+		err := n.Task.Run(ctx)
+		if err != nil {
 			errOnce.Do(func() { runErr = err })
 			failed.Store(true)
 		}
@@ -143,6 +148,7 @@ func (s *Scheduler) Run(ctx context.Context) error {
 	}
 
 	wg.Wait()
+
 	return runErr
 }
 
@@ -167,6 +173,7 @@ func (s *Scheduler) RunNext(ctx context.Context) error {
 	if s.step == nil {
 		if _, err := s.d.Sort(); err != nil {
 			s.mu.Unlock()
+
 			return err
 		}
 		st := &stepState{counters: s.d.InDegrees()}
@@ -180,6 +187,7 @@ func (s *Scheduler) RunNext(ctx context.Context) error {
 
 	if len(s.step.queue) == 0 {
 		s.mu.Unlock()
+
 		return ErrExhausted
 	}
 

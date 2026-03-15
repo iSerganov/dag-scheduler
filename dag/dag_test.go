@@ -9,7 +9,7 @@ import (
 
 // stask creates a no-op Task with the given id and name. Defined here and
 // shared with topo_test.go because both live in package dag.
-func stask(id uint64, name string) Task {
+func stask(id uint64, name string) *FuncTask {
 	return Func(id, name, func(_ context.Context) error { return nil })
 }
 
@@ -18,6 +18,7 @@ type DAGSuite struct {
 }
 
 func TestDAGSuite(t *testing.T) {
+	t.Parallel()
 	suite.Run(t, new(DAGSuite))
 }
 

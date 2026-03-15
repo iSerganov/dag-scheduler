@@ -78,11 +78,13 @@ func main() {
 
 	start := time.Now()
 	// single task execution
-	if err := s.RunNext(context.Background()); err != nil {
+	err := s.RunNext(context.Background())
+	if err != nil {
 		log.Fatal(err)
 	}
 	// full concurrent execution
-	if err := s.Run(context.Background()); err != nil {
+	err = s.Run(context.Background())
+	if err != nil {
 		log.Fatal(err)
 	}
 
@@ -91,11 +93,12 @@ func main() {
 }
 
 // task creates a named dag.Task that logs start/finish and calls work.
-func task(id uint64, name, stage string, work func()) dag.Task {
+func task(id uint64, name, stage string, work func()) *dag.FuncTask {
 	return dag.Func(id, name, func(_ context.Context) error {
 		fmt.Printf("[%-7s] %-14s  started\n", stage, name)
 		work()
 		fmt.Printf("[%-7s] %-14s  done\n", stage, name)
+
 		return nil
 	})
 }
@@ -122,7 +125,8 @@ func printPlan(s *scheduler.Scheduler) {
 
 // mustAdd registers a task with the scheduler and exits on error.
 func mustAdd(s *scheduler.Scheduler, t dag.Task, deps ...dag.Task) {
-	if err := s.AddTask(t, deps...); err != nil {
+	err := s.AddTask(t, deps...)
+	if err != nil {
 		log.Fatalf("add %s: %v", t.Name(), err)
 	}
 }
