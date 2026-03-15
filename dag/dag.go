@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"sync"
 )
 
@@ -119,25 +120,50 @@ func (d *DAG) InDegrees() map[uint64]int {
 	return out
 }
 
-// RemoveNode removes the node with the given id from the DAG and decrements
-// the in-degree of every node that depended on it.  If the id is not present,
-// RemoveNode is a no-op.
+// RemoveNode removes the node with the given id from the DAG and updates all
+// related state so the graph remains consistent:
+//
+//   - The in-degree of every dependent (node that listed id as a dependency)
+//     is decremented.
+//   - id is removed from the adjacency list of every predecessor (node that id
+//     depended on), so Sort never encounters a stale reference.
+//   - id is removed from the Deps slice of every surviving dependent.
+//
+// If id is not present, RemoveNode is a no-op.
 func (d *DAG) RemoveNode(id uint64) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if _, ok := d.nodes[id]; !ok {
+	n, ok := d.nodes[id]
+	if !ok {
 		return
 	}
 
-	// Decrement in-degrees of all dependents before deleting the edge list.
+	// 1. Decrement in-degrees of every node that depended on id.
 	for _, depID := range d.adj[id] {
 		d.inDeg[depID]--
 	}
 
+	// 2. Remove id from the adjacency list of each predecessor so that Sort
+	//    does not follow a dangling edge to a deleted node.
+	for _, pred := range n.Deps {
+		predID := pred.ID()
+		d.adj[predID] = slices.DeleteFunc(d.adj[predID], func(x uint64) bool {
+			return x == id
+		})
+	}
+
+	// 3. Remove the node itself.
 	delete(d.nodes, id)
 	delete(d.adj, id)
 	delete(d.inDeg, id)
+
+	// 4. Remove id from the Deps slice of every surviving node.
+	for _, node := range d.nodes {
+		node.Deps = slices.DeleteFunc(node.Deps, func(dep Task) bool {
+			return dep.ID() == id
+		})
+	}
 }
 
 // Len returns the number of nodes in the DAG.
