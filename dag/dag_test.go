@@ -45,6 +45,40 @@ func (s *DAGSuite) TestAddNode_UnknownDep() {
 	s.ErrorIs(err, ErrNodeNotFound)
 }
 
+func (s *DAGSuite) TestAddNode_NilNode() {
+	err := New().AddNode(nil)
+	s.Require().Error(err)
+}
+
+func (s *DAGSuite) TestAddNode_NilTask() {
+	err := New().AddNode(&Node{})
+	s.Require().Error(err)
+}
+
+func (s *DAGSuite) TestAddNode_NilDep() {
+	d := New()
+	err := d.AddNode(&Node{Task: stask(1, "a"), Deps: []Task{nil}})
+	s.Require().Error(err)
+}
+
+func (s *DAGSuite) TestAddNode_DuplicateDeps_InDegreeCorrect() {
+	// Supplying the same dependency twice must not inflate the in-degree.
+	d := New()
+	a := stask(1, "a")
+	b := stask(2, "b")
+	_ = d.AddNode(&Node{Task: a})
+	_ = d.AddNode(&Node{Task: b, Deps: []Task{a, a}})
+
+	deg := d.InDegrees()
+	s.Equal(1, deg[b.ID()], "duplicate dep must be deduplicated")
+
+	// The DAG must still sort cleanly and a appears before b.
+	sorted, err := d.Sort()
+	s.Require().NoError(err)
+	pos := posMap(sorted)
+	s.Less(pos[a.ID()], pos[b.ID()])
+}
+
 func (s *DAGSuite) TestDependents() {
 	d := New()
 	a := stask(1, "a")

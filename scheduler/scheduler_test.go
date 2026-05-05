@@ -185,6 +185,18 @@ func (s *SchedulerSuite) TestRun_TaskInProgress() {
 
 // ── AddTask ───────────────────────────────────────────────────────────────────
 
+func (s *SchedulerSuite) TestAddTask_NilTask() {
+	s.Error(scheduler.New().AddTask(nil), "expected error for nil task")
+}
+
+func (s *SchedulerSuite) TestAddTask_NilDep() {
+	sch := scheduler.New()
+	a := dag.Func(1, "a", func(_ context.Context) error { return nil })
+	s.mustAdd(sch, a)
+	s.Error(sch.AddTask(dag.Func(2, "b", func(_ context.Context) error { return nil }), nil),
+		"expected error for nil dependency")
+}
+
 func (s *SchedulerSuite) TestAddTask_DuplicateID() {
 	sch := scheduler.New()
 	a := dag.Func(1, "a", func(_ context.Context) error { return nil })
@@ -249,6 +261,43 @@ func (s *SchedulerSuite) TestRunNext_TaskError_StillAdvancesQueue() {
 	// a fails but its dependents are still enqueued.
 	s.ErrorIs(sch.RunNext(context.Background()), boom)
 	// b is now ready.
+	s.NoError(sch.RunNext(context.Background()))
+	s.ErrorIs(sch.RunNext(context.Background()), scheduler.ErrExhausted)
+}
+
+func (s *SchedulerSuite) TestRunNext_ConcurrentAddTask_NoRace() {
+	// Regression: if AddTask is called while RunNext is executing a task it
+	// resets s.step to nil. The post-task counter update must not dereference
+	// the nil pointer.
+	sch := scheduler.New()
+
+	started := make(chan struct{})
+	proceed := make(chan struct{})
+
+	a := dag.Func(1, "a", func(_ context.Context) error {
+		close(started)
+		<-proceed
+
+		return nil
+	})
+	s.mustAdd(sch, a)
+
+	runErr := make(chan error, 1)
+
+	go func() {
+		runErr <- sch.RunNext(context.Background())
+	}()
+
+	<-started
+
+	// AddTask while RunNext is in flight — this resets s.step to nil.
+	extra := dag.Func(2, "extra", func(_ context.Context) error { return nil })
+	s.Require().NoError(sch.AddTask(extra))
+
+	close(proceed)
+	s.Require().NoError(<-runErr, "RunNext must not panic or error after concurrent AddTask")
+
+	// Both 'extra' and any unblocked dependents of 'a' must still be runnable.
 	s.NoError(sch.RunNext(context.Background()))
 	s.ErrorIs(sch.RunNext(context.Background()), scheduler.ErrExhausted)
 }
@@ -450,6 +499,49 @@ func (s *SchedulerSuite) TestExecutionPlan_Empty() {
 	plan, err := scheduler.New().ExecutionPlan()
 	s.Require().NoError(err)
 	s.Empty(plan)
+}
+
+// ── Race / concurrency ────────────────────────────────────────────────────────
+
+// TestRun_ConcurrentAddTask verifies that AddTask called concurrently with Run
+// does not cause data races. The new tasks are added after Run has started;
+// they are not executed in the current run (Run operates on a snapshot), but
+// no corruption or panic must occur.
+func (s *SchedulerSuite) TestRun_ConcurrentAddTask() {
+	sch := scheduler.New()
+
+	// Seed the scheduler with tasks that give Run enough time to still be in
+	// flight while the goroutine below calls AddTask.
+	const numTasks = 20
+	prev := dag.Func(1, "root", func(_ context.Context) error { return nil })
+	s.mustAdd(sch, prev)
+
+	for i := uint64(2); i <= numTasks; i++ {
+		id := i
+		cur := dag.Func(id, fmt.Sprintf("t%d", id), func(_ context.Context) error {
+			return nil
+		})
+		s.mustAdd(sch, cur, prev)
+		prev = cur
+	}
+
+	runDone := make(chan error, 1)
+
+	go func() {
+		runDone <- sch.Run(context.Background())
+	}()
+
+	// Attempt to register new independent tasks while Run is executing.
+	// AddTask must not corrupt the scheduler; errors (ErrTaskInProgress is not
+	// returned by AddTask, so we just ignore registration errors here).
+	for i := uint64(numTasks + 1); i <= numTasks+10; i++ {
+		id := i
+		_ = sch.AddTask(dag.Func(id, fmt.Sprintf("extra-%d", id), func(_ context.Context) error {
+			return nil
+		}))
+	}
+
+	s.Require().NoError(<-runDone)
 }
 
 // mustAdd is a helper that calls AddTask and fails the test on error.
