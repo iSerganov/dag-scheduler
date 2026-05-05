@@ -20,6 +20,11 @@ func (f *FuncTask) Run(ctx context.Context) error { return f.fn(ctx) }
 
 // Func creates a Task from a plain function, id, and name.
 // It is a convenience constructor for callers that do not need a custom type.
+// Panics if fn is nil.
 func Func(id uint64, name string, fn func(context.Context) error) *FuncTask {
+	if fn == nil {
+		panic("dag.Func: fn must not be nil")
+	}
+
 	return &FuncTask{id: id, name: name, fn: fn}
 }

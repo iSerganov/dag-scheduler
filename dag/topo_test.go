@@ -65,13 +65,104 @@ func (s *TopoSuite) TestSort_Disconnected() {
 }
 
 func (s *TopoSuite) TestSort_ErrCycle_SentinelReachable() {
-	// The public API prevents cycles (deps must pre-exist), so we verify Sort
-	// completes cleanly and that the ErrCycle sentinel is a non-nil value.
+	// Verify the ErrCycle sentinel is a non-nil error value.
+	s.Error(ErrCycle, "ErrCycle must be a non-nil sentinel")
+}
+
+func (s *TopoSuite) TestSort_ErrCycle() {
+	_, err := newCyclicDAG().Sort()
+	s.Require().Error(err)
+	s.ErrorIs(err, ErrCycle)
+}
+
+func (s *TopoSuite) TestSort_ErrCycle_SelfLoop() {
+	// Self-loop: a node whose successor list points back to itself.
 	d := New()
-	_ = d.AddNode(&Node{Task: stask(10, "a")})
+	a := stask(3, "a")
+	_ = d.AddNode(&Node{Task: a})
+
+	d.mu.Lock()
+	d.adj[a.ID()] = append(d.adj[a.ID()], a.ID())
+	d.inDeg[a.ID()]++
+	d.mu.Unlock()
+
 	_, err := d.Sort()
-	s.NoError(err)
-	s.Error(ErrCycle)
+	s.Require().Error(err)
+	s.ErrorIs(err, ErrCycle)
+}
+
+func (s *TopoSuite) TestSortAndSnapshot_InDegAndDependents() {
+	//   A
+	//  / \
+	// B   C
+	//  \ /
+	//   D
+	d := New()
+	a, b, c, dd := stask(1, "a"), stask(2, "b"), stask(3, "c"), stask(4, "d")
+	_ = d.AddNode(&Node{Task: a})
+	_ = d.AddNode(&Node{Task: b, Deps: []Task{a}})
+	_ = d.AddNode(&Node{Task: c, Deps: []Task{a}})
+	_ = d.AddNode(&Node{Task: dd, Deps: []Task{b, c}})
+
+	snap, err := d.SortAndSnapshot()
+	s.Require().NoError(err)
+	s.Len(snap.Sorted, 4)
+
+	// Topological order must be consistent.
+	pos := posMap(snap.Sorted)
+	s.Less(pos[a.ID()], pos[b.ID()])
+	s.Less(pos[a.ID()], pos[c.ID()])
+	s.Less(pos[b.ID()], pos[dd.ID()])
+	s.Less(pos[c.ID()], pos[dd.ID()])
+
+	// In-degrees must reflect the original graph (not mutated by Kahn).
+	s.Equal(0, snap.InDeg[a.ID()])
+	s.Equal(1, snap.InDeg[b.ID()])
+	s.Equal(1, snap.InDeg[c.ID()])
+	s.Equal(2, snap.InDeg[dd.ID()])
+
+	// Dependents: A → {B, C}, B → {D}, C → {D}, D → {}.
+	aDepIDs := nodeIDs(snap.Dependents[a.ID()])
+	s.ElementsMatch([]uint64{b.ID(), c.ID()}, aDepIDs)
+	s.Equal([]uint64{dd.ID()}, nodeIDs(snap.Dependents[b.ID()]))
+	s.Equal([]uint64{dd.ID()}, nodeIDs(snap.Dependents[c.ID()]))
+	s.Empty(snap.Dependents[dd.ID()])
+}
+
+func (s *TopoSuite) TestSortAndSnapshot_ErrCycle() {
+	_, err := newCyclicDAG().SortAndSnapshot()
+	s.Require().Error(err)
+	s.ErrorIs(err, ErrCycle)
+}
+
+// newCyclicDAG returns a DAG with a manually injected back-edge that creates a
+// cycle. The public AddNode API prevents cycles (deps must pre-exist), so the
+// back-edge is written directly into the unexported adj/inDeg fields.
+//
+// Graph: A → B with back-edge B → A, so neither node can ever reach in-degree 0.
+func newCyclicDAG() *DAG {
+	d := New()
+	a := stask(1, "a")
+	b := stask(2, "b")
+	_ = d.AddNode(&Node{Task: a})
+	_ = d.AddNode(&Node{Task: b, Deps: []Task{a}})
+
+	d.mu.Lock()
+	d.adj[b.ID()] = append(d.adj[b.ID()], a.ID())
+	d.inDeg[a.ID()]++
+	d.mu.Unlock()
+
+	return d
+}
+
+// nodeIDs extracts Task.ID() from each node for compact assertion comparisons.
+func nodeIDs(nodes []*Node) []uint64 {
+	ids := make([]uint64, len(nodes))
+	for i, n := range nodes {
+		ids[i] = n.Task.ID()
+	}
+
+	return ids
 }
 
 // posMap returns a node-ID → position-in-slice map for assertion helpers.

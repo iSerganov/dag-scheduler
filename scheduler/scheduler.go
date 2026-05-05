@@ -21,12 +21,13 @@ var ErrTaskInProgress = errors.New("scheduler: task in progress")
 type stepState struct {
 	counters map[uint64]int
 	queue    []*dag.Node
+	head     int // index of the next element to dequeue; avoids O(N) slice shifts
 }
 
 // Scheduler builds a DAG of tasks and executes them with maximum parallelism:
 // a task starts as soon as all its declared dependencies finish.
 type Scheduler struct {
-	mu      sync.Mutex
+	mu      sync.RWMutex
 	d       *dag.DAG
 	byID    map[uint64]*dag.Node
 	step    *stepState  // nil until the first RunNext call; reset by AddTask
@@ -45,7 +46,18 @@ func New() *Scheduler {
 // Every dependency must have been added before the task that depends on it.
 // Registering a duplicate task ID or referencing an unregistered dependency
 // returns an error; the Scheduler remains usable after such an error.
+// Returns an error if t or any dep is nil.
 func (s *Scheduler) AddTask(t dag.Task, deps ...dag.Task) error {
+	if t == nil {
+		return errors.New("scheduler: task must not be nil")
+	}
+
+	for i, dep := range deps {
+		if dep == nil {
+			return fmt.Errorf("scheduler: dependency at index %d must not be nil", i)
+		}
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -77,10 +89,14 @@ func (s *Scheduler) AddTask(t dag.Task, deps ...dag.Task) error {
 // of the DAG; tasks with no dependency relationship may appear in any relative
 // order. Returns an error if the graph contains a cycle.
 func (s *Scheduler) ExecutionPlan() ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	sorted, err := s.d.Sort()
 	if err != nil {
 		return nil, err
 	}
+
 	plan := make([]string, len(sorted))
 	for i, n := range sorted {
 		plan[i] = fmt.Sprintf("%d: %s", n.Task.ID(), n.Task.Name())
@@ -102,18 +118,31 @@ func (s *Scheduler) Run(ctx context.Context) error {
 	}
 	defer s.running.Store(false)
 
-	if _, err := s.d.Sort(); err != nil {
+	// SortAndSnapshot acquires d.mu once and returns the topological order,
+	// per-node in-degree snapshot, and adjacency list — all consistent.
+	// Holding s.mu.RLock while calling it prevents concurrent AddTask (which
+	// takes the write lock) from mutating the DAG during the snapshot.
+	s.mu.RLock()
+	snap, err := s.d.SortAndSnapshot()
+
+	s.mu.RUnlock()
+
+	if err != nil {
 		return err
 	}
 
-	rawDeg := s.d.InDegrees()
+	nodes, rawDeg, adjSnap := snap.Sorted, snap.InDeg, snap.Dependents
 
-	// One atomic counter per node tracks remaining unfinished dependencies.
+	// Pre-allocate all atomic counters in one slice to avoid N separate heap
+	// allocations — pointers into a single backing array are just as valid.
+	atomicBacking := make([]atomic.Int32, len(rawDeg))
 	counters := make(map[uint64]*atomic.Int32, len(rawDeg))
+	i := 0
+
 	for id, deg := range rawDeg {
-		c := new(atomic.Int32)
-		c.Store(int32(deg))
-		counters[id] = c
+		atomicBacking[i].Store(int32(deg))
+		counters[id] = &atomicBacking[i]
+		i++
 	}
 
 	var (
@@ -127,7 +156,7 @@ func (s *Scheduler) Run(ctx context.Context) error {
 	runNode = func(n *dag.Node) {
 		// Skip execution but still drain the subgraph so the WaitGroup settles.
 		if ctx.Err() != nil || failed.Load() {
-			s.drainDependents(n, counters, &wg, runNode)
+			drainDependents(n, adjSnap, counters, &wg, runNode)
 
 			return
 		}
@@ -138,10 +167,10 @@ func (s *Scheduler) Run(ctx context.Context) error {
 			failed.Store(true)
 		}
 
-		s.drainDependents(n, counters, &wg, runNode)
+		drainDependents(n, adjSnap, counters, &wg, runNode)
 	}
 
-	for _, n := range s.d.Nodes() {
+	for _, n := range nodes {
 		if counters[n.Task.ID()].Load() == 0 {
 			wg.Go(func() { runNode(n) })
 		}
@@ -171,28 +200,35 @@ func (s *Scheduler) RunNext(ctx context.Context) error {
 	s.mu.Lock()
 
 	if s.step == nil {
-		if _, err := s.d.Sort(); err != nil {
+		snap, err := s.d.SortAndSnapshot()
+		if err != nil {
 			s.mu.Unlock()
 
 			return err
 		}
-		st := &stepState{counters: s.d.InDegrees()}
-		for _, n := range s.d.Nodes() {
+
+		st := &stepState{counters: snap.InDeg}
+		for _, n := range snap.Sorted {
 			if st.counters[n.Task.ID()] == 0 {
 				st.queue = append(st.queue, n)
 			}
 		}
+
 		s.step = st
 	}
 
-	if len(s.step.queue) == 0 {
+	if s.step.head >= len(s.step.queue) {
 		s.mu.Unlock()
 
 		return ErrExhausted
 	}
 
-	n := s.step.queue[0]
-	s.step.queue = s.step.queue[1:]
+	n := s.step.queue[s.step.head]
+	s.step.head++
+
+	// Capture dependents now, while holding s.mu, so the post-task update
+	// is independent of any concurrent AddTask that may set s.step to nil.
+	dependents := s.d.Dependents(n.Task.ID())
 	s.mu.Unlock()
 
 	// Always update the queue so dependents become available on the next call,
@@ -200,18 +236,23 @@ func (s *Scheduler) RunNext(ctx context.Context) error {
 	taskErr := n.Task.Run(ctx)
 
 	s.mu.Lock()
-	// Capture dependents before removing the node (RemoveNode deletes the edge list).
-	dependents := s.d.Dependents(n.Task.ID())
 	// Remove the completed node so Run sees only the remaining work.
 	s.d.RemoveNode(n.Task.ID())
 	delete(s.byID, n.Task.ID())
-	for _, dep := range dependents {
-		id := dep.Task.ID()
-		s.step.counters[id]--
-		if s.step.counters[id] == 0 {
-			s.step.queue = append(s.step.queue, dep)
+
+	// If a concurrent AddTask reset s.step to nil, skip the counter update —
+	// the next RunNext call will rebuild step state from scratch, at which point
+	// this node is already absent from the DAG.
+	if s.step != nil {
+		for _, dep := range dependents {
+			id := dep.Task.ID()
+			s.step.counters[id]--
+			if s.step.counters[id] == 0 {
+				s.step.queue = append(s.step.queue, dep)
+			}
 		}
 	}
+
 	s.mu.Unlock()
 
 	return taskErr
@@ -219,13 +260,16 @@ func (s *Scheduler) RunNext(ctx context.Context) error {
 
 // drainDependents decrements the in-degree counter of every node that depends
 // on n and launches any node whose counter reaches zero.
-func (s *Scheduler) drainDependents(
+// adjSnap is a pre-built adjacency snapshot captured before execution starts,
+// so this function never touches the live DAG.
+func drainDependents(
 	n *dag.Node,
+	adjSnap map[uint64][]*dag.Node,
 	counters map[uint64]*atomic.Int32,
 	wg *sync.WaitGroup,
 	runNode func(*dag.Node),
 ) {
-	for _, dep := range s.d.Dependents(n.Task.ID()) {
+	for _, dep := range adjSnap[n.Task.ID()] {
 		if counters[dep.Task.ID()].Add(-1) == 0 {
 			wg.Go(func() { runNode(dep) })
 		}

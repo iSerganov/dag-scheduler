@@ -44,7 +44,23 @@ func New() *DAG {
 // Every dependency listed in n.Deps must already be present in the DAG.
 // Returns ErrNodeExists if a node with the same Task ID is already registered.
 // Returns ErrNodeNotFound if any dependency is unknown.
+// Returns an error if n, n.Task, or any entry in n.Deps is nil.
+// Duplicate entries in n.Deps are silently deduplicated.
 func (d *DAG) AddNode(n *Node) error {
+	if n == nil {
+		return errors.New("node must not be nil")
+	}
+
+	if n.Task == nil {
+		return errors.New("node task must not be nil")
+	}
+
+	for i, dep := range n.Deps {
+		if dep == nil {
+			return fmt.Errorf("dependency at index %d must not be nil", i)
+		}
+	}
+
 	id := n.Task.ID()
 
 	d.mu.Lock()
@@ -54,15 +70,30 @@ func (d *DAG) AddNode(n *Node) error {
 		return fmt.Errorf("%w: id=%d name=%s", ErrNodeExists, id, n.Task.Name())
 	}
 
+	// Deduplicate deps, preserving first-seen order.
+	seen := make(map[uint64]struct{}, len(n.Deps))
+	dedupedDeps := make([]Task, 0, len(n.Deps))
+
 	for _, dep := range n.Deps {
+		if _, dup := seen[dep.ID()]; dup {
+			continue
+		}
+
+		seen[dep.ID()] = struct{}{}
+
 		if _, ok := d.nodes[dep.ID()]; !ok {
 			return fmt.Errorf("%w: dependency id=%d name=%s not found for node id=%d name=%s",
 				ErrNodeNotFound, dep.ID(), dep.Name(), id, n.Task.Name())
 		}
+
+		dedupedDeps = append(dedupedDeps, dep)
 	}
+
+	n.Deps = dedupedDeps
 
 	d.nodes[id] = n
 	d.inDeg[id] = len(n.Deps)
+
 	if _, ok := d.adj[id]; !ok {
 		d.adj[id] = nil
 	}
@@ -139,8 +170,13 @@ func (d *DAG) RemoveNode(id uint64) {
 		return
 	}
 
+	// Save the direct-dependent IDs before step 3 deletes d.adj[id].
+	// Only these nodes can have id in their Deps slice, so step 4 iterates
+	// them instead of all surviving nodes (O(out-degree) vs O(V)).
+	directDeps := d.adj[id]
+
 	// 1. Decrement in-degrees of every node that depended on id.
-	for _, depID := range d.adj[id] {
+	for _, depID := range directDeps {
 		d.inDeg[depID]--
 	}
 
@@ -158,11 +194,13 @@ func (d *DAG) RemoveNode(id uint64) {
 	delete(d.adj, id)
 	delete(d.inDeg, id)
 
-	// 4. Remove id from the Deps slice of every surviving node.
-	for _, node := range d.nodes {
-		node.Deps = slices.DeleteFunc(node.Deps, func(dep Task) bool {
-			return dep.ID() == id
-		})
+	// 4. Remove id from the Deps slice of its direct dependents only.
+	for _, depID := range directDeps {
+		if depNode, ok := d.nodes[depID]; ok {
+			depNode.Deps = slices.DeleteFunc(depNode.Deps, func(dep Task) bool {
+				return dep.ID() == id
+			})
+		}
 	}
 }
 

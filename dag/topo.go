@@ -2,7 +2,22 @@ package dag
 
 import (
 	"fmt"
+	"maps"
 )
+
+// GraphSnapshot is the result of SortAndSnapshot.
+type GraphSnapshot struct {
+	// Sorted is a valid topological ordering of all nodes: for every edge
+	// A → B (B depends on A), A appears before B.
+	Sorted []*Node
+	// InDeg is a writable copy of each node's dependency count at the moment
+	// of the snapshot. It is not mutated by the Kahn's algorithm run inside
+	// SortAndSnapshot, so callers can use it directly as an in-flight counter.
+	InDeg map[uint64]int
+	// Dependents maps each node ID to the nodes that directly depend on it.
+	// Equivalent to calling Dependents for every node but under a single lock.
+	Dependents map[uint64][]*Node
+}
 
 // Sort returns all nodes in a valid topological order using Kahn's algorithm
 // (O(V + E)), or returns ErrCycle if the graph is not acyclic.
@@ -28,36 +43,100 @@ import (
 // waiting for another member of the same cycle to finish first.  If the result
 // slice is shorter than the total node count, the missing nodes are part of a
 // cycle and ErrCycle is returned.
+//
+// The entire graph state is snapshotted under a single read lock so concurrent
+// AddNode/RemoveNode calls cannot produce an inconsistent view.
 func (d *DAG) Sort() ([]*Node, error) {
-	nodes := d.Nodes()
-	n := len(nodes)
-	inDeg := d.InDegrees()
+	snap, err := d.SortAndSnapshot()
+	if err != nil {
+		return nil, err
+	}
 
+	return snap.Sorted, nil
+}
+
+// SortAndSnapshot returns a GraphSnapshot containing the topological order,
+// per-node in-degree, and per-node dependents list — all captured under a
+// single read lock.
+//
+// This is more efficient than calling Sort, InDegrees, and Dependents
+// separately, and is intended for callers that need all three (e.g.
+// Scheduler.Run), where separate calls would re-acquire the read lock each time.
+//
+// Returns ErrCycle if the graph is not acyclic.
+func (d *DAG) SortAndSnapshot() (*GraphSnapshot, error) {
+	// Snapshot everything under a single read lock.
+	d.mu.RLock()
+	n := len(d.nodes)
+	nodeMap := make(map[uint64]*Node, n)
+	maps.Copy(nodeMap, d.nodes)
+
+	inDeg := make(map[uint64]int, len(d.inDeg))
+	maps.Copy(inDeg, d.inDeg)
+
+	adjIDs := make(map[uint64][]uint64, len(d.adj))
+
+	for id, succs := range d.adj {
+		cp := make([]uint64, len(succs))
+		copy(cp, succs)
+		adjIDs[id] = cp
+	}
+
+	d.mu.RUnlock()
+
+	// Build the Dependents map (id → []*Node) from the adj-ID snapshot so the
+	// caller never has to call Dependents in a separate lock acquisition.
+	dependents := make(map[uint64][]*Node, len(adjIDs))
+
+	for id, succIDs := range adjIDs {
+		if len(succIDs) > 0 {
+			nodes := make([]*Node, len(succIDs))
+			for i, sid := range succIDs {
+				nodes[i] = nodeMap[sid]
+			}
+
+			dependents[id] = nodes
+		}
+	}
+
+	// Run Kahn on a work copy so InDeg remains an unmodified snapshot for
+	// the caller.
+	inDegWork := maps.Clone(inDeg)
+
+	// Phase 1 — seed with zero in-degree nodes.
 	queue := make([]*Node, 0, n)
-	for _, node := range nodes {
-		if inDeg[node.Task.ID()] == 0 {
+
+	for id, node := range nodeMap {
+		if inDegWork[id] == 0 {
 			queue = append(queue, node)
 		}
 	}
 
+	// Phase 2 — BFS drain using an index pointer (O(1) dequeue, no slice shift).
 	sorted := make([]*Node, 0, n)
-	for len(queue) > 0 {
-		curr := queue[0]
-		queue = queue[1:]
+	head := 0
+
+	for head < len(queue) {
+		curr := queue[head]
+		head++
 		sorted = append(sorted, curr)
 
-		for _, dependent := range d.Dependents(curr.Task.ID()) {
-			id := dependent.Task.ID()
-			inDeg[id]--
-			if inDeg[id] == 0 {
-				queue = append(queue, dependent)
+		for _, succID := range adjIDs[curr.Task.ID()] {
+			inDegWork[succID]--
+			if inDegWork[succID] == 0 {
+				queue = append(queue, nodeMap[succID])
 			}
 		}
 	}
 
+	// Phase 3 — cycle detection.
 	if len(sorted) != n {
 		return nil, fmt.Errorf("%w: %d node(s) involved", ErrCycle, n-len(sorted))
 	}
 
-	return sorted, nil
+	return &GraphSnapshot{
+		Sorted:     sorted,
+		InDeg:      inDeg,
+		Dependents: dependents,
+	}, nil
 }
