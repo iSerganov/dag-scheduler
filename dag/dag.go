@@ -170,8 +170,13 @@ func (d *DAG) RemoveNode(id uint64) {
 		return
 	}
 
+	// Save the direct-dependent IDs before step 3 deletes d.adj[id].
+	// Only these nodes can have id in their Deps slice, so step 4 iterates
+	// them instead of all surviving nodes (O(out-degree) vs O(V)).
+	directDeps := d.adj[id]
+
 	// 1. Decrement in-degrees of every node that depended on id.
-	for _, depID := range d.adj[id] {
+	for _, depID := range directDeps {
 		d.inDeg[depID]--
 	}
 
@@ -189,11 +194,13 @@ func (d *DAG) RemoveNode(id uint64) {
 	delete(d.adj, id)
 	delete(d.inDeg, id)
 
-	// 4. Remove id from the Deps slice of every surviving node.
-	for _, node := range d.nodes {
-		node.Deps = slices.DeleteFunc(node.Deps, func(dep Task) bool {
-			return dep.ID() == id
-		})
+	// 4. Remove id from the Deps slice of its direct dependents only.
+	for _, depID := range directDeps {
+		if depNode, ok := d.nodes[depID]; ok {
+			depNode.Deps = slices.DeleteFunc(depNode.Deps, func(dep Task) bool {
+				return dep.ID() == id
+			})
+		}
 	}
 }
 

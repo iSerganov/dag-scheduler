@@ -27,7 +27,7 @@ type stepState struct {
 // Scheduler builds a DAG of tasks and executes them with maximum parallelism:
 // a task starts as soon as all its declared dependencies finish.
 type Scheduler struct {
-	mu      sync.Mutex
+	mu      sync.RWMutex
 	d       *dag.DAG
 	byID    map[uint64]*dag.Node
 	step    *stepState  // nil until the first RunNext call; reset by AddTask
@@ -89,8 +89,8 @@ func (s *Scheduler) AddTask(t dag.Task, deps ...dag.Task) error {
 // of the DAG; tasks with no dependency relationship may appear in any relative
 // order. Returns an error if the graph contains a cycle.
 func (s *Scheduler) ExecutionPlan() ([]string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
 	sorted, err := s.d.Sort()
 	if err != nil {
@@ -120,16 +120,18 @@ func (s *Scheduler) Run(ctx context.Context) error {
 
 	// SortAndSnapshot acquires d.mu once and returns the topological order,
 	// per-node in-degree snapshot, and adjacency list — all consistent.
-	// Holding s.mu while calling it ensures no concurrent AddTask can mutate
-	// the DAG between the cycle check and the snapshot reads.
-	s.mu.Lock()
-	nodes, rawDeg, adjSnap, err := s.d.SortAndSnapshot()
+	// Holding s.mu.RLock while calling it prevents concurrent AddTask (which
+	// takes the write lock) from mutating the DAG during the snapshot.
+	s.mu.RLock()
+	snap, err := s.d.SortAndSnapshot()
 
-	s.mu.Unlock()
+	s.mu.RUnlock()
 
 	if err != nil {
 		return err
 	}
+
+	nodes, rawDeg, adjSnap := snap.Sorted, snap.InDeg, snap.Dependents
 
 	// Pre-allocate all atomic counters in one slice to avoid N separate heap
 	// allocations — pointers into a single backing array are just as valid.
@@ -198,15 +200,15 @@ func (s *Scheduler) RunNext(ctx context.Context) error {
 	s.mu.Lock()
 
 	if s.step == nil {
-		sorted, inDeg, _, err := s.d.SortAndSnapshot()
+		snap, err := s.d.SortAndSnapshot()
 		if err != nil {
 			s.mu.Unlock()
 
 			return err
 		}
 
-		st := &stepState{counters: inDeg}
-		for _, n := range sorted {
+		st := &stepState{counters: snap.InDeg}
+		for _, n := range snap.Sorted {
 			if st.counters[n.Task.ID()] == 0 {
 				st.queue = append(st.queue, n)
 			}

@@ -5,6 +5,20 @@ import (
 	"maps"
 )
 
+// GraphSnapshot is the result of SortAndSnapshot.
+type GraphSnapshot struct {
+	// Sorted is a valid topological ordering of all nodes: for every edge
+	// A → B (B depends on A), A appears before B.
+	Sorted []*Node
+	// InDeg is a writable copy of each node's dependency count at the moment
+	// of the snapshot. It is not mutated by the Kahn's algorithm run inside
+	// SortAndSnapshot, so callers can use it directly as an in-flight counter.
+	InDeg map[uint64]int
+	// Dependents maps each node ID to the nodes that directly depend on it.
+	// Equivalent to calling Dependents for every node but under a single lock.
+	Dependents map[uint64][]*Node
+}
+
 // Sort returns all nodes in a valid topological order using Kahn's algorithm
 // (O(V + E)), or returns ErrCycle if the graph is not acyclic.
 //
@@ -33,32 +47,29 @@ import (
 // The entire graph state is snapshotted under a single read lock so concurrent
 // AddNode/RemoveNode calls cannot produce an inconsistent view.
 func (d *DAG) Sort() ([]*Node, error) {
-	sorted, _, _, err := d.SortAndSnapshot()
+	snap, err := d.SortAndSnapshot()
+	if err != nil {
+		return nil, err
+	}
 
-	return sorted, err
+	return snap.Sorted, nil
 }
 
-// SortAndSnapshot returns the same topological order as Sort along with two
-// additional snapshots captured under the same single read lock:
+// SortAndSnapshot returns a GraphSnapshot containing the topological order,
+// per-node in-degree, and per-node dependents list — all captured under a
+// single read lock.
 //
-//   - inDeg: a writable copy of each node's dependency count at the moment of
-//     the call (the original in-degrees, not mutated by Kahn's algorithm).
-//   - dependents: a map from each node ID to the slice of nodes that directly
-//     depend on it — equivalent to calling Dependents for every node but with
-//     only one lock acquisition total.
+// This is more efficient than calling Sort, InDegrees, and Dependents
+// separately, and is intended for callers that need all three (e.g.
+// Scheduler.Run), where separate calls would re-acquire the read lock each time.
 //
-// This method is intended for callers that need all three pieces of data (e.g.
-// Scheduler.Run), where calling Sort, InDegrees, and Dependents separately
-// would re-acquire the read lock on each call.
-func (d *DAG) SortAndSnapshot() ([]*Node, map[uint64]int, map[uint64][]*Node, error) {
+// Returns ErrCycle if the graph is not acyclic.
+func (d *DAG) SortAndSnapshot() (*GraphSnapshot, error) {
 	// Snapshot everything under a single read lock.
 	d.mu.RLock()
 	n := len(d.nodes)
 	nodeMap := make(map[uint64]*Node, n)
-
-	for id, node := range d.nodes {
-		nodeMap[id] = node
-	}
+	maps.Copy(nodeMap, d.nodes)
 
 	inDeg := make(map[uint64]int, len(d.inDeg))
 	maps.Copy(inDeg, d.inDeg)
@@ -73,7 +84,7 @@ func (d *DAG) SortAndSnapshot() ([]*Node, map[uint64]int, map[uint64][]*Node, er
 
 	d.mu.RUnlock()
 
-	// Build the dependents map (id → []*Node) from the adj-ID snapshot so the
+	// Build the Dependents map (id → []*Node) from the adj-ID snapshot so the
 	// caller never has to call Dependents in a separate lock acquisition.
 	dependents := make(map[uint64][]*Node, len(adjIDs))
 
@@ -88,7 +99,7 @@ func (d *DAG) SortAndSnapshot() ([]*Node, map[uint64]int, map[uint64][]*Node, er
 		}
 	}
 
-	// Run Kahn on a work copy so inDeg remains an unmodified snapshot for
+	// Run Kahn on a work copy so InDeg remains an unmodified snapshot for
 	// the caller.
 	inDegWork := maps.Clone(inDeg)
 
@@ -120,8 +131,12 @@ func (d *DAG) SortAndSnapshot() ([]*Node, map[uint64]int, map[uint64][]*Node, er
 
 	// Phase 3 — cycle detection.
 	if len(sorted) != n {
-		return nil, nil, nil, fmt.Errorf("%w: %d node(s) involved", ErrCycle, n-len(sorted))
+		return nil, fmt.Errorf("%w: %d node(s) involved", ErrCycle, n-len(sorted))
 	}
 
-	return sorted, inDeg, dependents, nil
+	return &GraphSnapshot{
+		Sorted:     sorted,
+		InDeg:      inDeg,
+		Dependents: dependents,
+	}, nil
 }

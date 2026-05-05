@@ -13,6 +13,8 @@ linters:
     funlen:
       lines: 100
       statements: 75
+    cyclop:
+      max-complexity: 12
   default: 'none'
   enable:
     - arangolint
